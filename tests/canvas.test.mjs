@@ -180,3 +180,139 @@ test("Chromium runs inline interactions inside the sandbox and blocks API reques
     await browser.close();
   }
 });
+
+test("one MCP call publishes a canvas and returns its working anonymous link", async () => {
+  const html = "<h1>Sample report</h1>";
+  const args = { title: "Sample report", html, request_id: "share-new-test" };
+  const result = await client.callTool({ name: "canvas_share", arguments: args });
+  assert.equal(result.isError, undefined, JSON.stringify(result));
+  const share = result.structuredContent;
+  assert.equal(share.published_revision, 1);
+  assert.equal(share.url, `${local.publicOrigin}/c/${share.id}`);
+  assert.ok(result.content.some((block) => block.type === "text" && block.text.includes(share.url)));
+  const page = await publicRequest(share.url);
+  assert.equal(page.status, 200);
+  const render = await publicRequest(`/render/${share.id}`);
+  assert.equal(render.status, 200);
+  assert.equal(await render.text(), html);
+  assert.deepEqual(await tool("share", args), share);
+});
+
+test("share requires a title for a new canvas and a base revision for edits", async () => {
+  const created = await tool("create", { title: "Sample draft", html: "<h1>Unpublished</h1>" });
+  for (const args of [
+    { html: "<h1>No title</h1>", request_id: "share-missing-title" },
+    { id: created.id, html: "<h1>No base revision</h1>", request_id: "share-missing-base" },
+  ]) {
+    const result = await client.callTool({ name: "canvas_share", arguments: args });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent?.url, undefined);
+  }
+  assert.equal((await publicRequest(`/c/${created.id}`)).status, 404);
+});
+
+test("sharing an edit preserves the link and rejects stale or conflicting writes", async () => {
+  const args = { title: "Sample report", html: "<h1>First revision</h1>", request_id: "share-edit-first" };
+  const first = await tool("share", args);
+  const edit = {
+    id: first.url, base_revision: 1, expected_published_revision: 1,
+    html: "<h1>Second revision</h1>", request_id: "share-edit-second",
+  };
+  const competingEdit = { ...edit, html: "<h1>Competing revision</h1>", request_id: "share-edit-competing" };
+  const [firstResult, competingResult] = await Promise.all([edit, competingEdit].map((arguments_) => client.callTool({
+    name: "canvas_share", arguments: arguments_,
+  })));
+  const winner = firstResult.isError ? competingEdit : edit;
+  const winningResult = firstResult.isError ? competingResult : firstResult;
+  const losingResult = firstResult.isError ? firstResult : competingResult;
+  assert.equal(winningResult.isError, undefined);
+  assert.equal(losingResult.structuredContent.code, "REVISION_CONFLICT");
+  const second = winningResult.structuredContent;
+  assert.deepEqual(second, { id: first.id, published_revision: 2, url: first.url });
+  assert.deepEqual(await tool("share", { ...winner, id: first.id }), second);
+  await failedTool("share", { ...winner, html: "<h1>Different content</h1>" }, "REQUEST_ID_REUSED");
+  await failedTool("share", { ...winner, base_revision: 2, request_id: "share-stale-publication" }, "PUBLICATION_CONFLICT");
+  assert.equal(await (await publicRequest(`/render/${first.id}`)).text(), winner.html);
+  assert.equal((await tool("get", { id: first.id })).latest_revision, 2);
+
+  await tool("unpublish", { id: first.id, expected_published_revision: 2 });
+  await failedTool("share", winner, "PUBLICATION_CHANGED");
+  assert.equal((await publicRequest(first.url)).status, 404);
+});
+
+test("the share tool advertises a self-contained MCP App card", async () => {
+  const { tools } = await client.listTools();
+  for (const name of ["canvas_share", "canvas_publish"]) {
+    const tool = tools.find((entry) => entry.name === name);
+    assert.ok(tool.outputSchema?.properties?.url);
+    const uri = tool._meta?.ui?.resourceUri;
+    assert.match(uri ?? "", /^ui:\/\//u);
+    const { contents } = await client.readResource({ uri });
+    assert.equal(contents[0].mimeType, "text/html;profile=mcp-app");
+    assert.match(contents[0].text, /Open canvas/u);
+  }
+});
+
+test("the MCP App opens the exact published link without a model reply", async () => {
+  const { build } = await import("esbuild");
+  const { chromium } = await import("playwright");
+  const listing = await client.listTools();
+  const definition = listing.tools.find((entry) => entry.name === "canvas_share");
+  const { contents: [card] } = await client.readResource({ uri: definition._meta.ui.resourceUri });
+  const result = await client.callTool({ name: definition.name, arguments: {
+    title: "Card browser test", html: "<h1>Sample report from the card</h1>", request_id: "share-card-browser",
+  } });
+  assert.equal(result.isError, undefined);
+  const { outputFiles: [host] } = await build({
+    stdin: {
+      resolveDir: process.cwd(),
+      contents: `
+        import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
+        window.mountCard = async ({ html, result }) => {
+          const frame = document.querySelector("iframe");
+          const bridge = new AppBridge(null, { name: "Canvas test host", version: "1.0.0" }, { openLinks: {} });
+          bridge.oninitialized = () => { void bridge.sendToolResult(result); };
+          bridge.onopenlink = async ({ url }) => {
+            window.open(url, "_blank", "noopener,noreferrer");
+            return {};
+          };
+          await bridge.connect(new PostMessageTransport(frame.contentWindow, frame.contentWindow));
+          frame.srcdoc = html;
+          window.sendCardResult = (data) => bridge.sendToolResult(data);
+        };
+      `,
+    },
+    bundle: true, platform: "browser", format: "iife", write: false,
+  });
+
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<iframe title="Canvas card" sandbox="allow-scripts allow-downloads allow-popups"></iframe>');
+    await page.addScriptTag({ content: host.text });
+    await page.evaluate(({ html, toolResult }) => window.mountCard({ html, result: toolResult }), {
+      html: card.text, toolResult: result,
+    });
+    const frame = page.frameLocator('iframe[title="Canvas card"]');
+    const link = frame.getByRole("link", { name: "Open canvas" });
+    await link.waitFor();
+    assert.equal(await link.getAttribute("href"), result.structuredContent.url);
+    const [popup] = await Promise.all([page.context().waitForEvent("page"), link.click()]);
+    await popup.frameLocator("iframe").getByRole("heading", { name: "Sample report from the card" }).waitFor();
+    const copy = frame.getByRole("button", { name: "Copy link" });
+    await copy.click();
+    const status = (await frame.getByRole("status").textContent()) ?? "";
+    assert.match(status, /^(Link copied\.|Copy the selected link\.)$/u);
+    if (status === "Copy the selected link.") {
+      assert.equal(await frame.getByRole("textbox", { name: "Canvas share URL" }).inputValue(), result.structuredContent.url);
+    }
+
+    await page.evaluate(({ id }) => window.sendCardResult({
+      content: [], structuredContent: { id, url: "https://external.invalid/c/" + id, published_revision: 1 },
+    }), result.structuredContent);
+    await frame.getByText("No published canvas link was returned.").waitFor();
+    assert.equal(await link.count(), 0);
+  } finally {
+    await browser.close();
+  }
+});

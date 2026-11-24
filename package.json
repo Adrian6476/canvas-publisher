@@ -8,14 +8,15 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "esbuild src/worker.ts --bundle --minify --format=esm --platform=browser --external:node:* --outfile=dist/worker.js",
-    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p app",
     "test": "pnpm build && node --test tests/*.test.mjs",
     "dev": "pnpm build && node scripts/dev.mjs",
     "bench": "pnpm build && node scripts/benchmark.mjs",
     "package": "pnpm build && node scripts/package-worker.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.4",
     "@modelcontextprotocol/sdk": "1.32.2",
     "zod": "4.6.7"
   },

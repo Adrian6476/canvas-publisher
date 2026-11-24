@@ -22,13 +22,23 @@ type Revision = Canvas & {
   html: string;
 };
 
+type ShareInput = {
+  request_id: string;
+  html: string;
+} & (
+  | { id?: undefined; base_revision?: undefined; expected_published_revision?: undefined; title: string }
+  | { id: string; base_revision: number; expected_published_revision?: number | null; title?: string }
+);
+
+type ShareReceipt = Canvas & { revision: number; share_request_hash: string };
+
 const selectRevision = `
   SELECT c.id, c.latest_revision, c.published_revision, r.revision, r.title, r.html
   FROM canvases c JOIN revisions r ON r.canvas_id = c.id
 `;
 
 export class CanvasService {
-  constructor(private readonly db: D1Database, private readonly publicOrigin: string) {}
+  constructor(private readonly db: D1Database, readonly publicOrigin: string) {}
 
   private id(reference: string): string {
     if (canvasId.test(reference)) return reference;
@@ -108,6 +118,72 @@ export class CanvasService {
     return { id, revision: base + 1 };
   }
 
+  async share(client: string, input: ShareInput) {
+    const { request_id, title, base_revision: base, expected_published_revision: expected } = input;
+    const reference = input.id === undefined ? null : this.id(input.id);
+    const id = reference ?? crypto.randomUUID();
+    const html = this.html(input.html);
+    const fingerprint = JSON.stringify([reference, base, title, html, expected !== undefined, expected]);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fingerprint));
+    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const hasRequest = `SELECT 1 FROM revisions WHERE created_by = ? AND share_request_id = ?`;
+    const statements = base === undefined ? [
+      this.db.prepare(`
+        INSERT INTO canvases (id, latest_revision, published_revision, created_by)
+        SELECT ?, 1, 1, ? WHERE NOT EXISTS (${hasRequest})
+      `).bind(id, client, client, request_id),
+      this.db.prepare(`
+        INSERT INTO revisions (canvas_id, revision, title, html, created_by, share_request_id, share_request_hash)
+        SELECT id, 1, ?, ?, ?, ?, ? FROM canvases WHERE id = ?
+      `).bind(title, html, client, request_id, hash, id),
+    ] : [
+      this.db.prepare(`
+        INSERT INTO revisions (canvas_id, revision, title, html, created_by, share_request_id, share_request_hash)
+        SELECT c.id, c.latest_revision + 1, COALESCE(?, r.title), ?, ?, ?, ?
+        FROM canvases c
+        JOIN revisions r ON r.canvas_id = c.id AND r.revision = c.latest_revision
+        WHERE c.id = ? AND c.latest_revision = ?
+          AND (? = 0 OR c.published_revision IS ?) AND NOT EXISTS (${hasRequest})
+      `).bind(title ?? null, html, client, request_id, hash, id, base,
+        expected === undefined ? 0 : 1, expected ?? null, client, request_id),
+      this.db.prepare(`
+        UPDATE canvases SET latest_revision = ?, published_revision = ?
+        WHERE id = ? AND latest_revision = ? AND EXISTS (
+          SELECT 1 FROM revisions WHERE canvas_id = ? AND revision = ?
+            AND created_by = ? AND share_request_id = ?
+        )
+      `).bind(base + 1, base + 1, id, base, id, base + 1, client, request_id),
+    ];
+
+    const [, , lookup] = await this.db.batch<ShareReceipt>([
+      ...statements,
+      this.db.prepare(`
+        SELECT c.id, c.latest_revision, c.published_revision, r.revision, r.share_request_hash
+        FROM revisions r JOIN canvases c ON c.id = r.canvas_id
+        WHERE r.created_by = ? AND r.share_request_id = ?
+      `).bind(client, request_id),
+    ]);
+    const receipt = lookup.results[0];
+    if (!receipt) {
+      const current = await this.get(id, undefined);
+      if (current.revision !== base) {
+        throw new CanvasError("REVISION_CONFLICT", `The latest draft is revision ${current.revision}. Read it before sharing.`);
+      }
+      throw new CanvasError("PUBLICATION_CONFLICT", "The published version has changed. Read the canvas before sharing.");
+    }
+    if (receipt.share_request_hash !== hash) {
+      throw new CanvasError("REQUEST_ID_REUSED", "Use a new request ID for a different share operation.");
+    }
+    if (receipt.published_revision !== receipt.revision) {
+      throw new CanvasError("PUBLICATION_CHANGED", "This request already completed. Its revision is no longer published.");
+    }
+    return this.publication(receipt.id, receipt.revision);
+  }
+
+  private publication(id: string, revision: number) {
+    return { id, published_revision: revision, url: `${this.publicOrigin}/c/${id}` };
+  }
+
   async publish(reference: string, revision: number, expected?: number | null) {
     const id = this.id(reference);
     const result = await this.db.prepare(`
@@ -119,7 +195,7 @@ export class CanvasService {
       await this.get(id, revision);
       throw new CanvasError("PUBLICATION_CONFLICT", "The published version has changed. Read the canvas before publishing.");
     }
-    return { id, published_revision: revision, url: `${this.publicOrigin}/c/${id}` };
+    return this.publication(id, revision);
   }
 
   async unpublish(reference: string, expected?: number | null) {
