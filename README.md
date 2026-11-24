@@ -32,7 +32,7 @@ A canvas accepts up to 256 KiB of UTF-8 HTML. The viewer runs inline scripts and
 
 ## Cloudflare deployment
 
-The production bundle targets one Worker named `canvas-publisher`, one D1 database and two Worker Custom Domains. Viewers use `https://canvas.adrian6476.top/c/<id>`. Agents use `https://canvas-api.adrian6476.top/mcp` with Streamable HTTP and a Bearer header. Keep the OpenWebUI connection scoped to the owner.
+Production runs on the `canvas-publisher` Worker, the `canvas-publisher` D1 database and two Worker Custom Domains. Viewers use `https://canvas.adrian6476.top/c/<id>`. Agents use `https://canvas-api.adrian6476.top/mcp` with Streamable HTTP and a Bearer header. Keep the OpenWebUI connection scoped to the owner.
 
 Build and validate the Cloudflare Build Output locally with the Cloudflare CLI. Use cf 1.0.0-rc.4 with Node.js 22.23 or a supported newer version.
 
@@ -44,13 +44,13 @@ cf deploy --prebuilt --dry-run --no-provision
 In an authorized Cloudflare account, create the D1 database once and save its returned ID as `CANVAS_D1_ID`. Use a credential with permission to manage this Worker, its D1 database and its custom domains.
 
 ```sh
-cf d1 create --name canvas-publisher --read-replication-mode disabled
+cf d1 create --name canvas-publisher --read-replication-mode disabled --primary-location-hint apac
 cf d1 migrations apply "$CANVAS_D1_ID" --dir migrations
 CANVAS_D1_ID="$CANVAS_D1_ID" pnpm package
 cf deploy --prebuilt --no-provision --secrets-file "$CANVAS_SECRETS_FILE"
 ```
 
-Supply a private JSON secrets file outside the repository. Set `CANVAS_CLIENT_TOKENS` to a JSON **string** containing an object keyed by client name. Its values are distinct high-entropy tokens, such as 32 random bytes encoded as hex. When rotating access, update the secret with the current client map. Keep `workers.dev` and preview URLs disabled so the configured custom domains are the entry points.
+Supply a private JSON secrets file outside the repository. Set `CANVAS_CLIENT_TOKENS` to a JSON **string** containing an object keyed by client name. Its values are distinct high-entropy tokens, such as 32 random bytes encoded as hex. When rotating access, update the secret with the current client map. The production configuration disables `workers.dev` and preview URLs. The deployment host holds the database ID and the secrets file in `~/.config/canvas-publisher/`.
 
 ## Direct latency
 
@@ -61,3 +61,16 @@ pnpm bench
 The default measures local loopback without a proxy. It records curl DNS, TCP and TLS completion, TTFB and total time for the share page, its iframe HTML and the two MCP discovery requests. Each endpoint gets one unreported warmup followed by 30 samples, each on a fresh connection. The benchmark tests the service path after the runtime starts.
 
 For a deployed instance, set `CANVAS_BENCH_API` to the HTTPS MCP URL, `CANVAS_BENCH_TOKEN` to a client credential and `CANVAS_BENCH_URL` to an existing published HTTPS share URL. The remote mode makes read-only calls and disables curl proxy use. Set `CANVAS_BENCH_INTERFACE` if you need to bind curl to a specific interface. A transparent VPN or tunnel can still influence the host route.
+
+### Production sample on 2026-11-24
+
+Measured from the home Ubuntu host through its physical network interface with curl proxies disabled. Each row has 30 successful HTTPS requests on fresh connections. The median time to finish TLS was 478–488 ms. A separate response-header check reached Cloudflare's Amsterdam edge (AMS).
+
+| Endpoint | TTFB p50 (ms) | TTFB p95 (ms) |
+| --- | ---: | ---: |
+| Public share page | 1073.35 | 2823.03 |
+| Published HTML | 982.62 | 3334.13 |
+| MCP initialize | 768.71 | 1715.32 |
+| MCP tools/list | 772.36 | 3082.55 |
+
+The public page and iframe HTML are separate requests. These timings measure each endpoint independently. The temporary benchmark canvas was withdrawn and both public paths returned HTTP 404.
