@@ -4,13 +4,16 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { authenticate } from "./auth";
 import { CanvasError, CanvasService, MAX_HTML_BYTES } from "./canvas";
+import { presentationInput, presentationOutput } from "./presentation";
 import { shareCard, shareCardMimeType, shareCardToolMeta, shareCardUri } from "./share-card";
 
 const maxRequestBytes = 2 * 1024 * 1024;
 const revision = z.number().int().positive();
 const reference = z.string().trim().min(1).max(2048).describe("Canvas ID or share URL.");
-const title = z.string().trim().min(1).max(160);
-const html = z.string().min(1).max(MAX_HTML_BYTES).describe("Complete self-contained HTML, up to 256 KiB in UTF-8.");
+const title = z.string().trim().min(1).max(160)
+  .describe("Specific, readable title in the user's language, shown on the card and browser tab. Put the subject first.");
+const html = z.string().min(1).max(MAX_HTML_BYTES)
+  .describe("Complete self-contained HTML, up to 256 KiB in UTF-8. Design for phones and desktops with accessible contrast, semantic headings, and keyboard-friendly interactions. Inline styles and scripts.");
 const expectedPublication = revision.nullable().optional()
   .describe("Last known published revision. Use null if unpublished. Omit for an unconditional action.");
 const shareFields = {
@@ -18,7 +21,7 @@ const shareFields = {
   request_id: z.string().min(1).max(128).describe("A unique ID for this share operation. Reuse it with the same arguments on retry."),
 };
 const shareInput = z.object({
-  ...shareFields, id: reference.optional(), base_revision: revision.optional(),
+  ...shareFields, ...presentationInput, id: reference.optional(), base_revision: revision.optional(),
   title: title.optional(), expected_published_revision: expectedPublication,
 }).superRefine((args, ctx) => {
   if (args.id === undefined) {
@@ -29,7 +32,7 @@ const shareInput = z.object({
     ctx.addIssue({ code: "custom", message: "Sharing an edit requires the latest base_revision." });
   }
 });
-const shareOutput = { id: z.uuid(), published_revision: revision, url: z.url() };
+const shareOutput = { id: z.uuid(), published_revision: revision, url: z.url(), title, ...presentationOutput };
 
 function shareLinkContent(data: { url: string }): CallToolResult["content"] {
   return [
@@ -40,24 +43,29 @@ function shareLinkContent(data: { url: string }): CallToolResult["content"] {
 
 async function result<T extends Record<string, unknown>>(
   operation: () => Promise<T>,
-  format = (data: T): CallToolResult["content"] => [{ type: "text", text: JSON.stringify(data) }],
+  format?: (data: T) => CallToolResult["content"],
 ): Promise<CallToolResult> {
   try {
     const data = await operation();
-    return { structuredContent: data, content: format(data) };
+    return { structuredContent: data, content: format ? format(data) : [{ type: "text", text: JSON.stringify(data) }] };
   } catch (error) {
     if (!(error instanceof CanvasError)) {
       console.error(JSON.stringify({ event: "canvas_tool_failed" }));
       return { isError: true, content: [{ type: "text", text: "Canvas operation failed." }] };
     }
     const data = { code: error.code, message: error.message };
-    return { isError: true, structuredContent: data, content: [{ type: "text", text: JSON.stringify(data) }] };
+    // Publication clients validate structuredContent against the success schema.
+    return {
+      isError: true,
+      ...(!format && { structuredContent: data }),
+      content: [{ type: "text", text: JSON.stringify(data) }],
+    };
   }
 }
 
 function makeServer(service: CanvasService): McpServer {
   const server = new McpServer({ name: "canvas-publisher", version: "0.1.0" }, {
-    instructions: "Use canvas_share when delivering a finished Canvas report or updating its shared link. It saves and publishes in one call. Anyone with the returned URL can view it. Copy that URL exactly. MCP tools only manage the authenticated owner's canvases. Use canvas_create and canvas_update for draft work. An existing draft can be published with canvas_publish.",
+    instructions: "Use canvas_share to deliver finished work or update its shared link in one call. Anyone with the returned URL can view it. Use the exact URL returned by the tool. Design the page for the reader's task with a clear hierarchy, responsive layout, accessible contrast, and self-contained assets. Write a specific title in the user's language. Add a summary or highlights only when they help the reader decide to open it. Choose the tab favicon and card layout and accent to suit the subject. MCP tools only manage the authenticated owner's canvases. Use canvas_create and canvas_update for drafts and canvas_publish for an existing revision.",
   });
 
   server.registerResource("canvas-share-link", shareCardUri, {
@@ -73,21 +81,21 @@ function makeServer(service: CanvasService): McpServer {
     outputSchema: shareOutput,
     annotations: { idempotentHint: true, openWorldHint: true },
     _meta: shareCardToolMeta,
-  }, ({ id, base_revision, title, expected_published_revision, ...fields }) => result(
+  }, ({ id, base_revision, title, expected_published_revision, html, request_id, ...presentation }) => result(
     () => id === undefined
-      ? service.share({ ...fields, title: title! })
-      : service.share({ ...fields, id, title, base_revision: base_revision!, expected_published_revision }),
+      ? service.share({ html, request_id, presentation, title: title! })
+      : service.share({ html, request_id, presentation, id, title, base_revision: base_revision!, expected_published_revision }),
     shareLinkContent,
   ));
 
   server.registerTool("canvas_create", {
     description: "Save a new canvas as a draft. Use canvas_share to deliver a finished canvas, or canvas_publish to publish a saved revision.",
     inputSchema: {
-      title, html,
+      title, html, ...presentationInput,
       request_id: z.string().min(1).max(128).optional().describe("Reuse the same ID if retrying this creation."),
     },
     annotations: { destructiveHint: false, openWorldHint: false },
-  }, ({ title, html, request_id }) => result(() => service.create(title, html, request_id)));
+  }, ({ title, html, request_id, ...presentation }) => result(() => service.create(title, html, request_id, presentation)));
 
   server.registerTool("canvas_get", {
     description: "Retrieve source and revision for a canvas you own. By default, retrieve the latest draft.",
@@ -97,9 +105,9 @@ function makeServer(service: CanvasService): McpServer {
 
   server.registerTool("canvas_update", {
     description: "Save a new draft on an existing canvas using its latest known revision. The public link keeps its published revision.",
-    inputSchema: { id: reference, base_revision: revision, html, title: title.optional() },
+    inputSchema: { id: reference, base_revision: revision, html, title: title.optional(), ...presentationInput },
     annotations: { destructiveHint: false, openWorldHint: false },
-  }, ({ id, base_revision, html, title }) => result(() => service.update(id, base_revision, html, title)));
+  }, ({ id, base_revision, html, title, ...presentation }) => result(() => service.update(id, base_revision, html, title, presentation)));
 
   server.registerTool("canvas_publish", {
     description: "Make an exact revision public at the canvas's stable share URL. Publishing an older revision restores it.",

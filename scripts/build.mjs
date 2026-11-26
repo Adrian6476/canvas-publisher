@@ -17,6 +17,7 @@ await build({
   minify: true,
   platform: "browser",
   external: ["node:*"],
+  loader: { ".png": "dataurl" },
   outfile: "dist/worker.js",
   define: { __CANVAS_SHARE_CARD_SCRIPT__: JSON.stringify(cardScript) },
   logLevel: "info",

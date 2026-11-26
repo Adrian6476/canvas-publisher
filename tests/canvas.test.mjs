@@ -43,10 +43,14 @@ test("MCP creates a draft and retrieves the submitted HTML", async () => {
   assert.equal(draft.published_revision, null);
 });
 
+function toolErrorCode(result) {
+  return (result.structuredContent ?? JSON.parse(result.content[0].text)).code;
+}
+
 async function failedTool(name, args, code, connection = client) {
   const result = await connection.callTool({ name: `canvas_${name}`, arguments: args });
   assert.equal(result.isError, true, JSON.stringify(result));
-  assert.equal(result.structuredContent?.code, code, JSON.stringify(result));
+  assert.equal(toolErrorCode(result), code, JSON.stringify(result));
 }
 
 function publicRequest(path, options) {
@@ -231,9 +235,9 @@ test("sharing an edit preserves the link and rejects stale or conflicting writes
   const winningResult = firstResult.isError ? competingResult : firstResult;
   const losingResult = firstResult.isError ? firstResult : competingResult;
   assert.equal(winningResult.isError, undefined);
-  assert.equal(losingResult.structuredContent.code, "REVISION_CONFLICT");
+  assert.equal(toolErrorCode(losingResult), "REVISION_CONFLICT");
   const second = winningResult.structuredContent;
-  assert.deepEqual(second, { id: first.id, published_revision: 2, url: first.url });
+  assert.deepEqual(second, { id: first.id, published_revision: 2, url: first.url, title: "Sample report" });
   assert.deepEqual(await tool("share", { ...winner, id: first.id }), second);
   await failedTool("share", { ...winner, html: "<h1>Different content</h1>" }, "REQUEST_ID_REUSED");
   await failedTool("share", { ...winner, base_revision: 2, request_id: "share-stale-publication" }, "PUBLICATION_CONFLICT");
@@ -266,6 +270,8 @@ test("the MCP App opens the exact published link without a model reply", async (
   const { contents: [card] } = await client.readResource({ uri: definition._meta.ui.resourceUri });
   const result = await client.callTool({ name: definition.name, arguments: {
     title: "Card browser test", html: "<h1>Sample report from the card</h1>", request_id: "share-card-browser",
+    summary: "Open the sample report.",
+    card: { layout: "feature", accent: "teal", highlights: ["Sample fact"], action_label: "Read sample" },
   } });
   assert.equal(result.isError, undefined);
   const { outputFiles: [host] } = await build({
@@ -275,7 +281,8 @@ test("the MCP App opens the exact published link without a model reply", async (
         import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
         window.mountCard = async ({ html, result }) => {
           const frame = document.querySelector("iframe");
-          const bridge = new AppBridge(null, { name: "Canvas test host", version: "1.0.0" }, { openLinks: {} });
+          const bridge = new AppBridge(null, { name: "Canvas test host", version: "1.0.0" }, { openLinks: {} },
+            { hostContext: { theme: "dark", locale: "en-US" } });
           bridge.oninitialized = () => { void bridge.sendToolResult(result); };
           bridge.onopenlink = async ({ url }) => {
             window.open(url, "_blank", "noopener,noreferrer");
@@ -284,6 +291,7 @@ test("the MCP App opens the exact published link without a model reply", async (
           await bridge.connect(new PostMessageTransport(frame.contentWindow, frame.contentWindow));
           frame.srcdoc = html;
           window.sendCardResult = (data) => bridge.sendToolResult(data);
+          window.setCardTheme = (theme) => bridge.sendHostContextChange({ theme });
         };
       `,
     },
@@ -292,15 +300,27 @@ test("the MCP App opens the exact published link without a model reply", async (
 
   const browser = await chromium.launch();
   try {
-    const page = await browser.newPage();
-    await page.setContent('<iframe title="Canvas card" sandbox="allow-scripts allow-downloads allow-popups"></iframe>');
+    const page = await browser.newPage({ viewport: { width: 320, height: 700 } });
+    await page.setContent('<iframe title="Canvas card" style="width:100%; height:300px; border:0" sandbox="allow-scripts allow-downloads allow-popups"></iframe>');
     await page.addScriptTag({ content: host.text });
     await page.evaluate(({ html, toolResult }) => window.mountCard({ html, result: toolResult }), {
       html: card.text, toolResult: result,
     });
     const frame = page.frameLocator('iframe[title="Canvas card"]');
-    const link = frame.getByRole("link", { name: "Open canvas" });
+    const link = frame.getByRole("link", { name: "Read sample" });
     await link.waitFor();
+    await frame.getByRole("heading", { name: "Card browser test" }).waitFor();
+    await frame.getByText("Open the sample report.").waitFor();
+    await frame.getByText("Sample fact").waitFor();
+    const main = frame.locator("main");
+    assert.equal(await main.getAttribute("data-layout"), "feature");
+    assert.equal(await main.getAttribute("data-accent"), "teal");
+    assert.equal(await frame.locator("html").getAttribute("data-theme"), "dark");
+    assert.equal(await main.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), true);
+    const darkBackground = await main.evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.evaluate(() => window.setCardTheme("light"));
+    await frame.locator('html[data-theme="light"]').waitFor();
+    assert.notEqual(await main.evaluate((el) => getComputedStyle(el).backgroundColor), darkBackground);
     assert.equal(await link.getAttribute("href"), result.structuredContent.url);
     const [popup] = await Promise.all([page.context().waitForEvent("page"), link.click()]);
     await popup.frameLocator("iframe").getByRole("heading", { name: "Sample report from the card" }).waitFor();
@@ -317,6 +337,18 @@ test("the MCP App opens the exact published link without a model reply", async (
     }), result.structuredContent);
     await frame.getByText("No published canvas link was returned.").waitFor();
     assert.equal(await link.count(), 0);
+    await page.evaluate(() => window.sendCardResult({
+      isError: true, content: [{ type: "text", text: '{"message":"The published version changed."}' }],
+    }));
+    await frame.getByText("The published version changed.").waitFor();
+    assert.equal(await link.count(), 0);
+
+    const { id, url, published_revision } = result.structuredContent;
+    await page.evaluate((legacy) => window.sendCardResult({ content: [], structuredContent: legacy }), {
+      id, url, published_revision,
+    });
+    await frame.getByRole("heading", { name: "Canvas" }).waitFor();
+    assert.equal(await frame.getByRole("link", { name: "Open canvas" }).getAttribute("href"), url);
   } finally {
     await browser.close();
   }
@@ -377,4 +409,39 @@ test("MCP rejects ambiguous token assignments and credentials without an owner",
       await testRuntime.runtime.dispose();
     }
   }
+});
+
+test("published revisions carry caller-selected card content and browser metadata", async () => {
+  const args = {
+    title: "Sample travel report", html: "<h1>Sample travel report</h1>", request_id: "presentation-v1",
+    summary: "Compare two ferry routes.", favicon: "travel",
+    card: { layout: "feature", accent: "teal", highlights: ["Two ferry routes"], action_label: "Read report" },
+  };
+  const first = await tool("share", args);
+  assert.equal(first.title, args.title);
+  assert.equal(first.summary, args.summary);
+  assert.equal(first.favicon, args.favicon);
+  assert.deepEqual(first.card, args.card);
+  const original = await (await publicRequest(first.url)).text();
+  assert.match(original, /<title>Sample travel report<\/title>/u);
+  const icon = original.match(/<link rel="icon" href="(data:image\/png;base64,[^"]+)"/u)?.[1];
+  assert.ok(icon);
+  await failedTool("share", { ...args, summary: "Changed summary" }, "REQUEST_ID_REUSED");
+
+  const { revision } = await tool("update", {
+    id: first.id, base_revision: 1, title: "Sample chart", html: "<h1>Chart</h1>",
+    summary: null, favicon: "chart", card: { layout: "compact" },
+  });
+  assert.equal(await (await publicRequest(first.url)).text(), original);
+  const second = await tool("publish", { id: first.id, revision });
+  assert.equal(second.title, "Sample chart");
+  assert.equal(second.summary, undefined);
+  assert.deepEqual(second.card, { ...args.card, layout: "compact" });
+  const changed = await (await publicRequest(first.url)).text();
+  assert.match(changed, /<title>Sample chart<\/title>/u);
+  assert.ok(changed.includes('rel="icon"'));
+  assert.ok(!changed.includes(icon));
+  const rollback = await tool("publish", { id: first.id, revision: 1 });
+  assert.deepEqual(rollback, first);
+  assert.equal(await (await publicRequest(first.url)).text(), original);
 });

@@ -14,4 +14,6 @@ Save a new immutable revision on edits and keep the published pointer separate. 
 
 Keep `canvas_share` atomic and preserve its request ID behavior when changing revisions or publishing. The MCP result is the source of the share URL. The card in `app/share-card.ts` renders that link through MCP Apps and uses a static UI resource built into the Worker. Keep real canvases and private deployment details in their private locations. Use synthetic HTML in fixtures.
 
+Keep card content and browser tab metadata tied to the published revision. The MCP presentation schema controls the supported layouts, colors and icons. The card renders caller text as plain text and the public wrapper embeds only bundled favicon assets. Keep legacy revisions and retry receipts usable across presentation changes.
+
 Run `pnpm typecheck`, `pnpm test` and `pnpm package` before deployment. Use `pnpm bench` for direct latency measurements. The default benchmark uses an isolated local D1 database. See the README for testing on a deployed Worker.

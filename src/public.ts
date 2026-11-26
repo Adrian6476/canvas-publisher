@@ -1,7 +1,13 @@
 import { canvasIdPattern, readPublished } from "./canvas";
+import { parsePresentation } from "./presentation";
+import canvasIcon from "./icons/canvas.png";
+import chartIcon from "./icons/chart.png";
+import codeIcon from "./icons/code.png";
+import documentIcon from "./icons/document.png";
+import travelIcon from "./icons/travel.png";
 
 const sharePath = new RegExp(`^/(c|render)/(${canvasIdPattern})/?$`, "u");
-const wrapperPolicy = "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+const wrapperPolicy = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 const renderPolicy = [
   "sandbox allow-scripts",
   "default-src 'none'",
@@ -16,14 +22,16 @@ const renderPolicy = [
 ].join("; ");
 
 const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const icons = { canvas: canvasIcon, chart: chartIcon, code: codeIcon, document: documentIcon, travel: travelIcon };
 
-function wrapper(id: string, title: string): string {
+function wrapper(id: string, title: string, favicon: keyof typeof icons = "canvas"): string {
   const label = title.replace(/[&<>"']/gu, (character) => entities[character]);
   return `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${label}</title>
+<link rel="icon" href="${icons[favicon]}" type="image/png" sizes="32x32">
 <style>html,body{margin:0;height:100%}iframe{display:block;border:0;width:100%;height:100%}</style>
 <iframe title="${label}" sandbox="allow-scripts" referrerpolicy="no-referrer" src="/render/${id}"></iframe>
 </html>`;
@@ -37,9 +45,9 @@ export async function servePublic(request: Request, path: string, db: D1Database
   }
   const [, route, id] = matched;
   const render = route === "render";
-  const published = await readPublished(db, id, render ? "html" : "title");
+  const published = await readPublished(db, id, render);
   if (published === null) return new Response("Not found", { status: 404 });
-  const body = render ? published : wrapper(id, published);
+  const body = render ? published.html : wrapper(id, published.title, parsePresentation(published.presentation).favicon);
   return new Response(request.method === "HEAD" ? null : body, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
