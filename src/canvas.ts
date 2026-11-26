@@ -38,7 +38,11 @@ const selectRevision = `
 `;
 
 export class CanvasService {
-  constructor(private readonly db: D1Database, readonly publicOrigin: string) {}
+  constructor(
+    private readonly db: D1Database,
+    readonly publicOrigin: string,
+    private readonly principal: CanvasPrincipal,
+  ) {}
 
   private id(reference: string): string {
     if (canvasId.test(reference)) return reference;
@@ -62,24 +66,25 @@ export class CanvasService {
     return value;
   }
 
-  async create(client: string, title: string, content: string, requestId: string | undefined) {
+  async create(title: string, content: string, requestId: string | undefined) {
+    const { ownerId, credentialId } = this.principal;
     const id = crypto.randomUUID();
     const html = this.html(content);
     const [insert] = await this.db.batch([
       this.db.prepare(`
-        INSERT INTO canvases (id, latest_revision, created_by, create_key) VALUES (?, 1, ?, ?)
+        INSERT INTO canvases (id, latest_revision, owner_id, created_by, create_key) VALUES (?, 1, ?, ?, ?)
         ON CONFLICT (created_by, create_key) DO NOTHING
-      `).bind(id, client, requestId ?? null),
+      `).bind(id, ownerId, credentialId, requestId ?? null),
       this.db.prepare(`
         INSERT INTO revisions (canvas_id, revision, title, html, created_by)
-        SELECT id, 1, ?, ?, ? FROM canvases WHERE id = ?
-      `).bind(title, html, client, id),
+        SELECT id, 1, ?, ?, ? FROM canvases WHERE id = ? AND owner_id = ?
+      `).bind(title, html, credentialId, id, ownerId),
     ]);
 
     if (insert.meta.changes === 1) return { id, revision: 1 };
     const existing = await this.db.prepare(`
-      ${selectRevision} WHERE c.created_by = ? AND c.create_key = ? AND r.revision = 1
-    `).bind(client, requestId ?? null).first<Revision>();
+      ${selectRevision} WHERE c.owner_id = ? AND c.created_by = ? AND c.create_key = ? AND r.revision = 1
+    `).bind(ownerId, credentialId, requestId ?? null).first<Revision>();
     if (!existing || existing.title !== title || existing.html !== html) {
       throw new CanvasError("REQUEST_ID_REUSED", "Use a new request ID for different content.");
     }
@@ -88,13 +93,14 @@ export class CanvasService {
 
   async get(reference: string, revision: number | undefined) {
     const found = await this.db.prepare(`
-      ${selectRevision} WHERE c.id = ? AND r.revision = COALESCE(?, c.latest_revision)
-    `).bind(this.id(reference), revision ?? null).first<Revision>();
+      ${selectRevision} WHERE c.id = ? AND c.owner_id = ? AND r.revision = COALESCE(?, c.latest_revision)
+    `).bind(this.id(reference), this.principal.ownerId, revision ?? null).first<Revision>();
     if (!found) throw new CanvasError("NOT_FOUND", "Canvas or revision was not found.");
     return found;
   }
 
-  async update(client: string, reference: string, base: number, content: string, title?: string) {
+  async update(reference: string, base: number, content: string, title?: string) {
+    const { ownerId, credentialId } = this.principal;
     const id = this.id(reference);
     const html = this.html(content);
     const [, update] = await this.db.batch([
@@ -103,12 +109,12 @@ export class CanvasService {
         SELECT c.id, c.latest_revision + 1, COALESCE(?, r.title), ?, ?
         FROM canvases c
         JOIN revisions r ON r.canvas_id = c.id AND r.revision = c.latest_revision
-        WHERE c.id = ? AND c.latest_revision = ?
-      `).bind(title ?? null, html, client, id, base),
+        WHERE c.id = ? AND c.owner_id = ? AND c.latest_revision = ?
+      `).bind(title ?? null, html, credentialId, id, ownerId, base),
       this.db.prepare(`
         UPDATE canvases SET latest_revision = latest_revision + 1
-        WHERE id = ? AND latest_revision = ?
-      `).bind(id, base),
+        WHERE id = ? AND owner_id = ? AND latest_revision = ?
+      `).bind(id, ownerId, base),
     ]);
 
     if (update.meta.changes !== 1) {
@@ -118,7 +124,8 @@ export class CanvasService {
     return { id, revision: base + 1 };
   }
 
-  async share(client: string, input: ShareInput) {
+  async share(input: ShareInput) {
+    const { ownerId, credentialId } = this.principal;
     const { request_id, title, base_revision: base, expected_published_revision: expected } = input;
     const reference = input.id === undefined ? null : this.id(input.id);
     const id = reference ?? crypto.randomUUID();
@@ -129,30 +136,30 @@ export class CanvasService {
     const hasRequest = `SELECT 1 FROM revisions WHERE created_by = ? AND share_request_id = ?`;
     const statements = base === undefined ? [
       this.db.prepare(`
-        INSERT INTO canvases (id, latest_revision, published_revision, created_by)
-        SELECT ?, 1, 1, ? WHERE NOT EXISTS (${hasRequest})
-      `).bind(id, client, client, request_id),
+        INSERT INTO canvases (id, latest_revision, published_revision, owner_id, created_by)
+        SELECT ?, 1, 1, ?, ? WHERE NOT EXISTS (${hasRequest})
+      `).bind(id, ownerId, credentialId, credentialId, request_id),
       this.db.prepare(`
         INSERT INTO revisions (canvas_id, revision, title, html, created_by, share_request_id, share_request_hash)
-        SELECT id, 1, ?, ?, ?, ?, ? FROM canvases WHERE id = ?
-      `).bind(title, html, client, request_id, hash, id),
+        SELECT id, 1, ?, ?, ?, ?, ? FROM canvases WHERE id = ? AND owner_id = ?
+      `).bind(title, html, credentialId, request_id, hash, id, ownerId),
     ] : [
       this.db.prepare(`
         INSERT INTO revisions (canvas_id, revision, title, html, created_by, share_request_id, share_request_hash)
         SELECT c.id, c.latest_revision + 1, COALESCE(?, r.title), ?, ?, ?, ?
         FROM canvases c
         JOIN revisions r ON r.canvas_id = c.id AND r.revision = c.latest_revision
-        WHERE c.id = ? AND c.latest_revision = ?
+        WHERE c.id = ? AND c.owner_id = ? AND c.latest_revision = ?
           AND (? = 0 OR c.published_revision IS ?) AND NOT EXISTS (${hasRequest})
-      `).bind(title ?? null, html, client, request_id, hash, id, base,
-        expected === undefined ? 0 : 1, expected ?? null, client, request_id),
+      `).bind(title ?? null, html, credentialId, request_id, hash, id, ownerId, base,
+        expected === undefined ? 0 : 1, expected ?? null, credentialId, request_id),
       this.db.prepare(`
         UPDATE canvases SET latest_revision = ?, published_revision = ?
-        WHERE id = ? AND latest_revision = ? AND EXISTS (
+        WHERE id = ? AND owner_id = ? AND latest_revision = ? AND EXISTS (
           SELECT 1 FROM revisions WHERE canvas_id = ? AND revision = ?
             AND created_by = ? AND share_request_id = ?
         )
-      `).bind(base + 1, base + 1, id, base, id, base + 1, client, request_id),
+      `).bind(base + 1, base + 1, id, ownerId, base, id, base + 1, credentialId, request_id),
     ];
 
     const [, , lookup] = await this.db.batch<ShareReceipt>([
@@ -160,8 +167,8 @@ export class CanvasService {
       this.db.prepare(`
         SELECT c.id, c.latest_revision, c.published_revision, r.revision, r.share_request_hash
         FROM revisions r JOIN canvases c ON c.id = r.canvas_id
-        WHERE r.created_by = ? AND r.share_request_id = ?
-      `).bind(client, request_id),
+        WHERE c.owner_id = ? AND r.created_by = ? AND r.share_request_id = ?
+      `).bind(ownerId, credentialId, request_id),
     ]);
     const receipt = lookup.results[0];
     if (!receipt) {
@@ -188,9 +195,9 @@ export class CanvasService {
     const id = this.id(reference);
     const result = await this.db.prepare(`
       UPDATE canvases SET published_revision = ?
-      WHERE id = ? AND (? = 0 OR published_revision IS ?)
+      WHERE id = ? AND owner_id = ? AND (? = 0 OR published_revision IS ?)
       AND EXISTS (SELECT 1 FROM revisions WHERE canvas_id = canvases.id AND revision = ?)
-    `).bind(revision, id, expected === undefined ? 0 : 1, expected ?? null, revision).run();
+    `).bind(revision, id, this.principal.ownerId, expected === undefined ? 0 : 1, expected ?? null, revision).run();
     if (result.meta.changes !== 1) {
       await this.get(id, revision);
       throw new CanvasError("PUBLICATION_CONFLICT", "The published version has changed. Read the canvas before publishing.");
@@ -202,22 +209,24 @@ export class CanvasService {
     const id = this.id(reference);
     const result = await this.db.prepare(`
       UPDATE canvases SET published_revision = NULL
-      WHERE id = ? AND (? = 0 OR published_revision IS ?)
-    `).bind(id, expected === undefined ? 0 : 1, expected ?? null).run();
+      WHERE id = ? AND owner_id = ? AND (? = 0 OR published_revision IS ?)
+    `).bind(id, this.principal.ownerId, expected === undefined ? 0 : 1, expected ?? null).run();
     if (result.meta.changes !== 1) {
       await this.get(id, undefined);
       throw new CanvasError("PUBLICATION_CONFLICT", "The published version has changed. Read the canvas before unpublishing.");
     }
     return { id, published_revision: null };
   }
+}
+import type { CanvasPrincipal } from "./auth";
 
-  async readPublished(id: string, field: "title" | "html") {
-    const row = await this.db.prepare(`
-      SELECT r.${field} AS value
-      FROM canvases c
-      JOIN revisions r ON r.canvas_id = c.id AND r.revision = c.published_revision
-      WHERE c.id = ?
-    `).bind(id).first<{ value: string }>();
-    return row?.value ?? null;
-  }
+
+export async function readPublished(db: D1Database, id: string, field: "title" | "html") {
+  const row = await db.prepare(`
+    SELECT r.${field} AS value
+    FROM canvases c
+    JOIN revisions r ON r.canvas_id = c.id AND r.revision = c.published_revision
+    WHERE c.id = ?
+  `).bind(id).first<{ value: string }>();
+  return row?.value ?? null;
 }

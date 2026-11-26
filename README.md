@@ -1,6 +1,6 @@
 # Canvas Publisher
 
-Publish a self-contained HTML canvas at a stable, anonymous share URL. Agents use an authenticated MCP server to edit drafts, publish a specific revision, roll back or withdraw a link. All authorized clients belong to one owner and can edit the same canvases.
+Publish a self-contained HTML canvas at a stable, anonymous share URL. Agents use an authenticated MCP server to edit drafts, publish a specific revision, roll back or withdraw a link. Each owner manages their own canvases across their authorized clients.
 
 ## Local development
 
@@ -31,9 +31,22 @@ Use `canvas_share` when delivering a finished report or updating its public link
 
 Use the returned `url` as the share link. MCP Apps clients such as OpenWebUI display open and copy actions for successful shares and publications. The same results include the link as text for clients without MCP Apps support.
 
-Set `expected_published_revision` on a share edit, publish or withdrawal when acting on a previously read state. Use `null` when the canvas was unpublished at the time of the read. Save, publish and withdrawal operations are atomic. Any authorized client can read and edit any draft. Give each client a distinct credential so its access can be revoked individually.
+Set `expected_published_revision` on a share edit, publish or withdrawal when acting on a previously read state. Use `null` when the canvas was unpublished at the time of the read. Save, publish and withdrawal operations are atomic.
 
 A canvas accepts up to 256 KiB of UTF-8 HTML. The viewer runs inline scripts and styles inside an opaque-origin iframe. Images can use data or blob URLs and fonts can use data URLs. The browser policy blocks external scripts, fetch, form submission and navigation of the top-level viewer by embedded content. A viewer exposes the HTML source to anyone with the link. Public links opt out of search indexing and are served without caching.
+
+## Owners and credentials
+
+A credential identifies one owner. Give a person a stable owner ID and a distinct credential for each client they use. Clients assigned to the same owner can manage that owner's canvases. MCP returns `NOT_FOUND` for canvases belonging to another owner, even when given their share URL. Anyone with a published link can still open the published revision in a browser.
+
+Store `CANVAS_CLIENT_TOKENS` as a JSON string in the deployment secrets file. The decoded object maps credential names to a `token` and explicit `owner_id`. Names and owner IDs use 1–64 lowercase alphanumerics, hyphens or underscores. Use a different random token for each entry, such as 32 random bytes encoded as hex. Rotate a token by replacing its value while keeping the credential name and owner ID. Remove an entry to revoke that credential. Do not recycle owner IDs for another person.
+
+```json
+{
+  "primary-client": {"owner_id": "owner", "token": "<unique-token-for-this-client>"},
+  "friend-client": {"owner_id": "friend-a", "token": "<different-unique-token>"}
+}
+```
 
 ## Cloudflare deployment
 
@@ -57,7 +70,9 @@ cf deploy --prebuilt --no-provision --secrets-file "$CANVAS_SECRETS_FILE"
 
 For updates, reuse the existing D1 database ID and apply pending migrations before uploading the Worker. Migration `0002_share_requests.sql` adds share retry tracking to existing revision records.
 
-Supply a private JSON secrets file outside the repository. Set `CANVAS_CLIENT_TOKENS` to a JSON **string** containing an object keyed by client name. Its values are distinct high-entropy tokens, such as 32 random bytes encoded as hex. When rotating access, update the secret with the current client map. The production configuration disables `workers.dev` and preview URLs. The deployment host holds the database ID and the secrets file in `~/.config/canvas-publisher/`.
+Migration `0003_canvas_ownership.sql` assigns all existing canvases to the reserved owner ID `owner`. Back up the private secrets file and convert each existing entry from a token string to an object with its same token and `"owner_id": "owner"`. Keep the credential names to preserve the existing retry receipts. Apply the migration, then upload the Worker and the converted secrets file together. Verify access with an existing client before provisioning any additional owners. Once additional owners have canvases, use an ownership-aware Worker version for any rollback.
+
+Supply a private JSON secrets file outside the repository. The production configuration disables `workers.dev` and preview URLs. The deployment host holds the database ID and the secrets file in `~/.config/canvas-publisher/`.
 
 ## Direct latency
 

@@ -1,4 +1,3 @@
-import { CanvasService } from "./canvas";
 import { serveMcp } from "./mcp";
 import { servePublic } from "./public";
 
@@ -12,14 +11,13 @@ interface CanvasBindings {
 export default {
   async fetch(request, bindings): Promise<Response> {
     const url = new URL(request.url);
-    const service = new CanvasService(bindings.DB, bindings.PUBLIC_ORIGIN);
     let response: Response;
 
     try {
       if (url.origin === bindings.API_ORIGIN && url.pathname === "/mcp") {
-        response = await serveMcp(request, service, bindings.CANVAS_CLIENT_TOKENS);
+        response = await serveMcp(request, bindings.DB, bindings.PUBLIC_ORIGIN, bindings.CANVAS_CLIENT_TOKENS);
       } else if (url.origin === bindings.PUBLIC_ORIGIN) {
-        response = await servePublic(request, url.pathname, service);
+        response = await servePublic(request, url.pathname, bindings.DB);
       } else {
         response = new Response("Not found", { status: 404 });
       }

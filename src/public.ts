@@ -1,4 +1,4 @@
-import { CanvasService, canvasIdPattern } from "./canvas";
+import { canvasIdPattern, readPublished } from "./canvas";
 
 const sharePath = new RegExp(`^/(c|render)/(${canvasIdPattern})/?$`, "u");
 const wrapperPolicy = "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
@@ -29,7 +29,7 @@ function wrapper(id: string, title: string): string {
 </html>`;
 }
 
-export async function servePublic(request: Request, path: string, service: CanvasService): Promise<Response> {
+export async function servePublic(request: Request, path: string, db: D1Database): Promise<Response> {
   const matched = sharePath.exec(path);
   if (!matched) return new Response("Not found", { status: 404 });
   if (request.method !== "GET" && request.method !== "HEAD") {
@@ -37,7 +37,7 @@ export async function servePublic(request: Request, path: string, service: Canva
   }
   const [, route, id] = matched;
   const render = route === "render";
-  const published = await service.readPublished(id, render ? "html" : "title");
+  const published = await readPublished(db, id, render ? "html" : "title");
   if (published === null) return new Response("Not found", { status: 404 });
   const body = render ? published : wrapper(id, published);
   return new Response(request.method === "HEAD" ? null : body, {

@@ -1,0 +1,1 @@
+ALTER TABLE canvases ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'owner';

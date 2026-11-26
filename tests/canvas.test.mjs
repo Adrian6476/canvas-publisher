@@ -7,10 +7,15 @@ import { localClientToken, startLocalRuntime } from "../scripts/local-runtime.mj
 let local;
 let client;
 const secondClientToken = "second-client-test-token-for-local-use-only";
+const friendClientToken = "friend-client-test-token-for-local-use-only";
 
 before(async () => {
   local = await startLocalRuntime({
-    clients: { local: localClientToken, second: secondClientToken },
+    clients: {
+      local: { token: localClientToken, owner_id: "owner" },
+      second: { token: secondClientToken, owner_id: "owner" },
+      friend: { token: friendClientToken, owner_id: "friend" },
+    },
   });
   client = new Client({ name: "canvas-tests", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL("/mcp", local.apiOrigin), {
@@ -38,8 +43,8 @@ test("MCP creates a draft and retrieves the submitted HTML", async () => {
   assert.equal(draft.published_revision, null);
 });
 
-async function failedTool(name, args, code) {
-  const result = await client.callTool({ name: `canvas_${name}`, arguments: args });
+async function failedTool(name, args, code, connection = client) {
+  const result = await connection.callTool({ name: `canvas_${name}`, arguments: args });
   assert.equal(result.isError, true, JSON.stringify(result));
   assert.equal(result.structuredContent?.code, code, JSON.stringify(result));
 }
@@ -314,5 +319,62 @@ test("the MCP App opens the exact published link without a model reply", async (
     assert.equal(await link.count(), 0);
   } finally {
     await browser.close();
+  }
+});
+
+test("an owner credential only manages canvases belonging to that owner", async () => {
+  const friend = new Client({ name: "friend-agent", version: "1.0.0" });
+  try {
+    await friend.connect(new StreamableHTTPClientTransport(new URL("/mcp", local.apiOrigin), {
+      requestInit: { headers: { Authorization: `Bearer ${friendClientToken}` } },
+    }));
+    const args = { title: "Owner report", html: "<h1>Owner report</h1>", request_id: "isolation-share" };
+    const own = await tool("share", args);
+    const theirs = await tool("share", { ...args, html: "<h1>Friend report</h1>" }, friend);
+    assert.notEqual(own.id, theirs.id);
+    const draft = await tool("update", { id: own.id, base_revision: 1, html: "<p>Owner draft</p>" });
+    assert.equal(draft.revision, 2);
+    for (const [operation, parameters] of [
+      ["get", { id: own.url }],
+      ["get", { id: own.id, revision: 1 }],
+      ["update", { id: own.id, base_revision: 2, html: "<p>Foreign edit</p>" }],
+      ["share", { id: own.url, base_revision: 2, html: "<p>Foreign share</p>", request_id: "isolation-foreign" }],
+      ["publish", { id: own.id, revision: 2 }],
+      ["unpublish", { id: own.url }],
+    ]) {
+      await failedTool(operation, parameters, "NOT_FOUND", friend);
+    }
+    await failedTool("get", { id: theirs.id }, "NOT_FOUND");
+    assert.equal((await tool("get", { id: theirs.id }, friend)).html, "<h1>Friend report</h1>");
+    assert.equal((await tool("get", { id: own.id })).latest_revision, 2);
+    for (const canvas of [own, theirs]) assert.equal((await publicRequest(canvas.url)).status, 200);
+    assert.equal(await (await publicRequest(`/render/${own.id}`)).text(), args.html);
+  } finally {
+    await friend.close();
+  }
+});
+
+test("MCP rejects ambiguous token assignments and credentials without an owner", async () => {
+  const duplicateToken = "duplicate-token-for-local-ownership-test";
+  const legacyToken = "legacy-unassigned-token-for-local-test";
+  const malformedMap = {
+    valid: { token: localClientToken, owner_id: "owner" },
+    legacy: legacyToken,
+  };
+  const ambiguousMap = {
+    valid: { token: localClientToken, owner_id: "owner" },
+    first: { token: duplicateToken, owner_id: "owner" },
+    second: { token: duplicateToken, owner_id: "friend" },
+  };
+  for (const [clients, rejected] of [[malformedMap, legacyToken], [ambiguousMap, duplicateToken]]) {
+    const testRuntime = await startLocalRuntime({ clients });
+    try {
+      const response = await fetch(new URL("/mcp", testRuntime.apiOrigin), {
+        method: "POST", headers: { Authorization: `Bearer ${rejected}` },
+      });
+      assert.equal(response.status, 401);
+    } finally {
+      await testRuntime.runtime.dispose();
+    }
   }
 });

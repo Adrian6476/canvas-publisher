@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { authenticate } from "./auth";
 import { CanvasError, CanvasService, MAX_HTML_BYTES } from "./canvas";
 import { shareCard, shareCardMimeType, shareCardToolMeta, shareCardUri } from "./share-card";
 
@@ -54,9 +55,9 @@ async function result<T extends Record<string, unknown>>(
   }
 }
 
-function makeServer(service: CanvasService, client: string): McpServer {
+function makeServer(service: CanvasService): McpServer {
   const server = new McpServer({ name: "canvas-publisher", version: "0.1.0" }, {
-    instructions: "Use canvas_share when delivering a finished Canvas report or updating its shared link. It saves and publishes in one call. Anyone with the returned URL can view it. Copy that URL exactly. Use canvas_create and canvas_update for draft work. An existing draft can be published with canvas_publish.",
+    instructions: "Use canvas_share when delivering a finished Canvas report or updating its shared link. It saves and publishes in one call. Anyone with the returned URL can view it. Copy that URL exactly. MCP tools only manage the authenticated owner's canvases. Use canvas_create and canvas_update for draft work. An existing draft can be published with canvas_publish.",
   });
 
   server.registerResource("canvas-share-link", shareCardUri, {
@@ -74,8 +75,8 @@ function makeServer(service: CanvasService, client: string): McpServer {
     _meta: shareCardToolMeta,
   }, ({ id, base_revision, title, expected_published_revision, ...fields }) => result(
     () => id === undefined
-      ? service.share(client, { ...fields, title: title! })
-      : service.share(client, { ...fields, id, title, base_revision: base_revision!, expected_published_revision }),
+      ? service.share({ ...fields, title: title! })
+      : service.share({ ...fields, id, title, base_revision: base_revision!, expected_published_revision }),
     shareLinkContent,
   ));
 
@@ -86,10 +87,10 @@ function makeServer(service: CanvasService, client: string): McpServer {
       request_id: z.string().min(1).max(128).optional().describe("Reuse the same ID if retrying this creation."),
     },
     annotations: { destructiveHint: false, openWorldHint: false },
-  }, ({ title, html, request_id }) => result(() => service.create(client, title, html, request_id)));
+  }, ({ title, html, request_id }) => result(() => service.create(title, html, request_id)));
 
   server.registerTool("canvas_get", {
-    description: "Retrieve canvas source and its revision. By default, retrieve the latest draft.",
+    description: "Retrieve source and revision for a canvas you own. By default, retrieve the latest draft.",
     inputSchema: { id: reference, revision: revision.optional() },
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, ({ id, revision }) => result(() => service.get(id, revision)));
@@ -98,7 +99,7 @@ function makeServer(service: CanvasService, client: string): McpServer {
     description: "Save a new draft on an existing canvas using its latest known revision. The public link keeps its published revision.",
     inputSchema: { id: reference, base_revision: revision, html, title: title.optional() },
     annotations: { destructiveHint: false, openWorldHint: false },
-  }, ({ id, base_revision, html, title }) => result(() => service.update(client, id, base_revision, html, title)));
+  }, ({ id, base_revision, html, title }) => result(() => service.update(id, base_revision, html, title)));
 
   server.registerTool("canvas_publish", {
     description: "Make an exact revision public at the canvas's stable share URL. Publishing an older revision restores it.",
@@ -117,24 +118,6 @@ function makeServer(service: CanvasService, client: string): McpServer {
   }, ({ id, expected_published_revision }) => result(() => service.unpublish(id, expected_published_revision)));
 
   return server;
-}
-
-const tokenFormat = /^[A-Za-z0-9_-]{24,256}$/u;
-const encoder = new TextEncoder();
-
-export async function authenticate(request: Request, credentials: string | undefined): Promise<string | undefined> {
-  const supplied = /^Bearer (\S+)$/iu.exec(request.headers.get("Authorization") ?? "")?.[1];
-  if (!credentials || !supplied || !tokenFormat.test(supplied)) return;
-  const clients: unknown = JSON.parse(credentials);
-  if (!clients || typeof clients !== "object" || Array.isArray(clients)) return;
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(supplied));
-  let matched: string | undefined;
-  for (const [name, token] of Object.entries(clients)) {
-    if (typeof token !== "string" || !tokenFormat.test(token) || !/^[a-z0-9_-]{1,64}$/u.test(name)) continue;
-    const expected = await crypto.subtle.digest("SHA-256", encoder.encode(token));
-    if (crypto.subtle.timingSafeEqual(digest, expected)) matched = name;
-  }
-  return matched;
 }
 
 function rpcError(status: number, code: number, message: string, headers?: HeadersInit): Response {
@@ -165,13 +148,15 @@ async function readBody(request: Request): Promise<unknown> {
   }
 }
 
-export async function serveMcp(request: Request, service: CanvasService, credentials: string | undefined): Promise<Response> {
+export async function serveMcp(
+  request: Request, db: D1Database, publicOrigin: string, credentials: string | undefined,
+): Promise<Response> {
   const origin = request.headers.get("Origin");
   if (origin !== null && origin !== new URL(request.url).origin) {
     return rpcError(403, -32000, "Origin is not allowed.");
   }
-  const client = await authenticate(request, credentials);
-  if (!client) {
+  const principal = await authenticate(request, credentials);
+  if (!principal) {
     return rpcError(401, -32000, "Bearer authentication required.", { "WWW-Authenticate": "Bearer" });
   }
   if (request.method !== "POST") {
@@ -188,7 +173,7 @@ export async function serveMcp(request: Request, service: CanvasService, credent
     if (error instanceof RangeError) return rpcError(413, -32000, "Request is too large.");
     return rpcError(400, -32700, "Invalid JSON.");
   }
-  const server = makeServer(service, client);
+  const server = makeServer(new CanvasService(db, publicOrigin, principal));
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
   try {
     await server.connect(transport);

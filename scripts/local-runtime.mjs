@@ -10,7 +10,7 @@ export const localClientToken = "local-test-token-for-canvas-development-only";
 export async function startLocalRuntime({
   port = 0,
   persistent = false,
-  clients = { local: localClientToken },
+  clients = { local: { token: localClientToken, owner_id: "owner" } },
 } = {}) {
   // Use separate hostnames for the public and MCP surfaces on the same loopback server.
   const config = {
