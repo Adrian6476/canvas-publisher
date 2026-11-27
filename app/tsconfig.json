@@ -4,5 +4,5 @@
     "lib": ["ES2024", "DOM"],
     "types": []
   },
-  "include": ["share-card.ts"]
+  "include": ["share-card.ts", "../src/assets.d.ts"]
 }

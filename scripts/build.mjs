@@ -6,6 +6,7 @@ const card = await build({
   format: "iife",
   minify: true,
   platform: "browser",
+  loader: { ".png": "dataurl" },
   write: false,
 });
 const cardScript = card.outputFiles[0].text.replace(/<\/script/giu, "<\\/script");

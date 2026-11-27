@@ -46,15 +46,10 @@ export function shareCard(publicOrigin: string): string {
     }
     .delivery { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px 11px; align-items: start; }
     .mark {
-      display: grid; place-items: center; color: var(--accent); background: var(--tint);
+      display: grid; place-items: center; background: var(--tint);
       inline-size: 36px; block-size: 36px; border-radius: 10px;
     }
-    .mark::before {
-      content: ""; inline-size: 17px; block-size: 14px; border: 1.5px solid currentColor;
-      border-radius: 3px; background:
-        linear-gradient(currentColor, currentColor) 0 3px / 100% 1px no-repeat,
-        linear-gradient(currentColor, currentColor) 4px 4px / 1px 100% no-repeat;
-    }
+    .mark img { inline-size: 26px; block-size: 26px; }
     h1, p, ul { margin: 0; overflow-wrap: anywhere; }
     h1 { font-size: 1rem; line-height: 1.35; font-weight: 650; letter-spacing: -0.015em; }
     #summary { color: var(--muted); margin-top: 3px; font-size: .875rem; }
@@ -97,7 +92,7 @@ export function shareCard(publicOrigin: string): string {
 <body data-public-origin="${encodeURIComponent(publicOrigin)}">
   <main id="card" data-layout="compact" data-accent="neutral">
     <div id="delivery" class="delivery" hidden>
-      <span class="mark" aria-hidden="true"></span>
+      <span class="mark" aria-hidden="true"><img id="icon" alt="" width="26" height="26"></span>
       <div>
         <h1 id="title" dir="auto">Canvas</h1>
         <p id="summary" dir="auto" hidden></p>

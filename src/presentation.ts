@@ -1,14 +1,15 @@
 import { z } from "zod";
 
-export const faviconIds = ["canvas", "document", "chart", "travel", "code"] as const;
+const iconIds = ["canvas", "document", "chart", "travel", "code"] as const;
 export const layouts = ["compact", "feature", "editorial"] as const;
 export const accents = ["neutral", "blue", "teal", "violet", "amber"] as const;
 
 const summary = z.string().trim().min(1).max(180)
   .describe("One sentence in the user's language explaining what the reader will get. Omit if the title already says enough.");
-const favicon = z.enum(faviconIds)
+const favicon = z.enum(iconIds)
   .describe("Browser tab icon. Choose the closest subject. The default is canvas.");
 const card = z.strictObject({
+  icon: z.enum(iconIds).describe("Icon shown on the delivery card. Choose a symbol for the subject, such as travel for an itinerary or chart for an analysis. Defaults to the browser favicon, then canvas.").optional(),
   layout: z.enum(layouts).describe("Use compact for a simple deliverable, feature for an overview with key facts, or editorial for a reading-oriented report.").optional(),
   accent: z.enum(accents).describe("Choose a single color suited to the content.").optional(),
   highlights: z.array(z.string().trim().min(1).max(80)).max(3)
@@ -25,8 +26,9 @@ export const presentationOutput = {
 
 export const presentationInput = {
   summary: summary.nullish().describe("One useful sentence about what the reader will get. Omit to inherit on edit, or send null to remove."),
-  favicon: favicon.nullish().describe("Browser tab icon chosen for the subject. Omit to inherit on edit, or send null for the Canvas default."),
+  favicon: favicon.nullish().describe("Set explicitly for a new canvas: travel for itineraries, chart for data, code for demos, or document for general reports. Omit to inherit on edit, or send null for the Canvas default."),
   card: z.strictObject({
+    icon: card.shape.icon.nullable().describe("Delivery card icon. Choose one for the subject. Omit to inherit on edit, or send null to follow the browser favicon."),
     layout: card.shape.layout.nullable(),
     accent: card.shape.accent.nullable(),
     highlights: card.shape.highlights.nullable(),

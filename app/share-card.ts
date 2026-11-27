@@ -1,4 +1,5 @@
 import { App } from "@modelcontextprotocol/ext-apps/app-with-deps";
+import { defaultIconSource, iconSource } from "../src/icons";
 import type { Presentation } from "../src/presentation";
 
 type ShareResult = Presentation & { id: string; url: string; title?: string };
@@ -30,6 +31,7 @@ const chinese = {
 const app = new App({ name: "Canvas share link", version: "1.0.0" });
 const card = document.querySelector<HTMLElement>("#card")!;
 const delivery = document.querySelector<HTMLElement>("#delivery")!;
+const icon = document.querySelector<HTMLImageElement>("#icon")!;
 const title = document.querySelector<HTMLElement>("#title")!;
 const summary = document.querySelector<HTMLElement>("#summary")!;
 const highlights = document.querySelector<HTMLElement>("#highlights")!;
@@ -107,6 +109,7 @@ app.ontoolresult = (result) => {
   }
   card.dataset.layout = details.card?.layout ?? "compact";
   card.dataset.accent = details.card?.accent ?? "neutral";
+  icon.src = iconSource(details.card?.icon) ?? iconSource(details.favicon) ?? defaultIconSource;
   title.textContent = details.title || "Canvas";
   summary.textContent = details.summary ?? "";
   summary.hidden = !details.summary;

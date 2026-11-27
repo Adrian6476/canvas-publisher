@@ -1,5 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { localClientToken, startLocalRuntime } from "../scripts/local-runtime.mjs";
@@ -270,7 +271,7 @@ test("the MCP App opens the exact published link without a model reply", async (
   const { contents: [card] } = await client.readResource({ uri: definition._meta.ui.resourceUri });
   const result = await client.callTool({ name: definition.name, arguments: {
     title: "Card browser test", html: "<h1>Sample report from the card</h1>", request_id: "share-card-browser",
-    summary: "Open the sample report.",
+    summary: "Open the sample report.", favicon: "travel",
     card: { layout: "feature", accent: "teal", highlights: ["Sample fact"], action_label: "Read sample" },
   } });
   assert.equal(result.isError, undefined);
@@ -312,6 +313,12 @@ test("the MCP App opens the exact published link without a model reply", async (
     await frame.getByRole("heading", { name: "Card browser test" }).waitFor();
     await frame.getByText("Open the sample report.").waitFor();
     await frame.getByText("Sample fact").waitFor();
+    const mark = frame.locator(".mark img");
+    const iconSource = async (name) => {
+      const png = await readFile(new URL(`../src/icons/${name}.png`, import.meta.url));
+      return `data:image/png;base64,${png.toString("base64")}`;
+    };
+    assert.equal(await mark.getAttribute("src", { timeout: 1500 }), await iconSource("travel"));
     const main = frame.locator("main");
     assert.equal(await main.getAttribute("data-layout"), "feature");
     assert.equal(await main.getAttribute("data-accent"), "teal");
@@ -344,11 +351,39 @@ test("the MCP App opens the exact published link without a model reply", async (
     assert.equal(await link.count(), 0);
 
     const { id, url, published_revision } = result.structuredContent;
+    const updated = await client.callTool({ name: "canvas_share", arguments: {
+      id, base_revision: published_revision, html: "<h1>Sample report from the card</h1>",
+      request_id: "share-card-icon", card: { icon: "chart" },
+    } });
+    assert.equal(updated.isError, undefined, JSON.stringify(updated));
+    assert.equal(updated.structuredContent.card.icon, "chart");
+    assert.equal(updated.structuredContent.favicon, "travel");
+    assert.ok((await (await publicRequest(url)).text()).includes(await iconSource("travel")));
+    await page.evaluate((response) => window.sendCardResult(response), updated);
+    const chartSource = await iconSource("chart");
+    await frame.locator(`img[src="${chartSource}"]`).waitFor();
+    assert.equal(await mark.evaluate(async (el) => {
+      await el.decode();
+      return el.naturalWidth;
+    }), 32);
+
+    const reset = await client.callTool({ name: "canvas_share", arguments: {
+      id, base_revision: updated.structuredContent.published_revision,
+      html: "<h1>Sample report from the card</h1>", request_id: "share-card-icon-reset",
+      card: { icon: null },
+    } });
+    assert.equal(reset.isError, undefined, JSON.stringify(reset));
+    assert.equal(reset.structuredContent.card.icon, undefined);
+    await page.evaluate((response) => window.sendCardResult(response), reset);
+    const travelSource = await iconSource("travel");
+    await frame.locator(`img[src="${travelSource}"]`).waitFor();
+
     await page.evaluate((legacy) => window.sendCardResult({ content: [], structuredContent: legacy }), {
       id, url, published_revision,
     });
     await frame.getByRole("heading", { name: "Canvas" }).waitFor();
     assert.equal(await frame.getByRole("link", { name: "Open canvas" }).getAttribute("href"), url);
+    assert.equal(await mark.getAttribute("src"), await iconSource("canvas"));
   } finally {
     await browser.close();
   }

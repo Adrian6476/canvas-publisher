@@ -39,9 +39,10 @@ Use the returned `url` as the share link. MCP Apps clients such as OpenWebUI dis
 | --- | --- |
 | `title` | Name the actual deliverable in the reader's language. The card and browser tab use this title. |
 | `summary` | Optional sentence with up to 180 characters explaining what the reader will get. |
-| `favicon` | Choose `canvas`, `document`, `chart`, `travel` or `code` for the browser tab. The default is `canvas`. |
+| `favicon` | Choose `canvas`, `document`, `chart`, `travel` or `code` for the browser tab. Set it explicitly for a new canvas. Use `document` for general reports. |
 | `card.layout` | Choose `compact` for a simple delivery, `feature` for an overview with key facts, or `editorial` for a long-form report. |
 | `card.accent` | Choose `neutral`, `blue`, `teal`, `violet` or `amber`. |
+| `card.icon` | Choose from the same icons to override the delivery card icon. By default, the card uses the browser favicon. Both use the Canvas icon when no icon is set. |
 | `card.highlights` | Include up to three useful facts of at most 80 characters each. |
 | `card.action_label` | Provide up to 24 characters for the primary action, such as “View itinerary”. |
 

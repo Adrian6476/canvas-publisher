@@ -65,7 +65,7 @@ async function result<T extends Record<string, unknown>>(
 
 function makeServer(service: CanvasService): McpServer {
   const server = new McpServer({ name: "canvas-publisher", version: "0.1.0" }, {
-    instructions: "Use canvas_share to deliver finished work or update its shared link in one call. Anyone with the returned URL can view it. Use the exact URL returned by the tool. Design the page for the reader's task with a clear hierarchy, responsive layout, accessible contrast, and self-contained assets. Write a specific title in the user's language. Add a summary or highlights only when they help the reader decide to open it. Choose the tab favicon and card layout and accent to suit the subject. MCP tools only manage the authenticated owner's canvases. Use canvas_create and canvas_update for drafts and canvas_publish for an existing revision.",
+    instructions: "Use canvas_share to deliver finished work or update its shared link in one call. Anyone with the returned URL can view it. Use the exact URL returned by the tool. Design the page for the reader's task with a clear hierarchy, responsive layout, accessible contrast, and self-contained assets. Write a specific title in the user's language. Add a summary or highlights only when they help the reader decide to open it. Choose a subject-specific favicon, such as travel for an itinerary or chart for an analysis. The card follows that icon by default. Set card.icon to customize it independently, and choose a suitable layout and accent. MCP tools only manage the authenticated owner's canvases. Use canvas_create and canvas_update for drafts and canvas_publish for an existing revision.",
   });
 
   server.registerResource("canvas-share-link", shareCardUri, {
@@ -76,7 +76,7 @@ function makeServer(service: CanvasService): McpServer {
   }));
 
   server.registerTool("canvas_share", {
-    description: "Deliver a finished HTML canvas at an anonymous share URL. Omit id to create with a title, or pass id and the latest base_revision to publish an edit at the same URL. Return the URL from this tool.",
+    description: "Deliver a finished HTML canvas at an anonymous share URL. For new canvases, omit id and provide a title and a subject-specific favicon. To publish an edit at the same URL, pass id and the latest base_revision. Return the URL from this tool.",
     inputSchema: shareInput,
     outputSchema: shareOutput,
     annotations: { idempotentHint: true, openWorldHint: true },
